@@ -302,40 +302,48 @@ class FitZoneETL:
     
     @staticmethod
     def run_daily_analytics():
-        """Napi aggregált elemzések"""
-        # Extract
-        fact_visits = supabase_get("fact_visits")
-        dim_members = supabase_get("dim_member")
-        
-        if fact_visits.empty:
+        """Napi aggregált elemzések - egyszerűbb verzió"""
+        try:
+            # Közvetlenül az OLTP-ből elemzünk
+            query = """
+            SELECT 
+                COUNT(DISTINCT c.member_id) as unique_visitors,
+                COUNT(*) as total_visits,
+                EXTRACT(HOUR FROM c.check_in_time) as peak_hour,
+                m.status,
+                CASE 
+                    WHEN EXTRACT(YEAR FROM AGE(m.birth_date)) < 25 THEN '<25'
+                    WHEN EXTRACT(YEAR FROM AGE(m.birth_date)) < 35 THEN '25-35'
+                    WHEN EXTRACT(YEAR FROM AGE(m.birth_date)) < 45 THEN '35-45'
+                    WHEN EXTRACT(YEAR FROM AGE(m.birth_date)) < 55 THEN '45-55'
+                    ELSE '55+'
+                END as age_group
+            FROM check_ins c
+            JOIN members m ON c.member_id = m.member_id
+            WHERE DATE(c.check_in_time) = CURRENT_DATE
+            GROUP BY peak_hour, m.status, age_group
+            """
+            
+            engine = get_engine()
+            result = pd.read_sql(query, engine)
+            
+            if result.empty:
+                return None
+            
+            # Aggregációk
+            analytics = {
+                "date": datetime.now().date().isoformat(),
+                "total_visits": result['total_visits'].sum(),
+                "unique_visitors": result['unique_visitors'].sum(),
+                "peak_hour": result.groupby('peak_hour')['total_visits'].sum().idxmax() if not result.empty else 0,
+                "by_age_group": result.groupby('age_group')['unique_visitors'].sum().to_dict()
+            }
+            
+            return analytics
+            
+        except Exception as e:
+            st.error(f"Analytics hiba: {e}")
             return None
-        
-        # Transform - Mai adatok
-        today_key = int(datetime.now().strftime('%Y%m%d'))
-        today_visits = fact_visits[fact_visits['date_key'] == today_key]
-        
-        if today_visits.empty:
-            return None
-        
-        # Csatlakozás a dimenzió táblával
-        visits_with_members = today_visits.merge(
-            dim_members[['member_key', 'current_membership_type', 'age_group']], 
-            on='member_key',
-            how='left'
-        )
-        
-        # Aggregációk
-        analytics = {
-            "date": datetime.now().date().isoformat(),
-            "total_visits": len(today_visits),
-            "unique_visitors": today_visits['member_key'].nunique(),
-            "avg_duration": today_visits['duration_minutes'].mean() if today_visits['duration_minutes'].notna().any() else 0,
-            "peak_hour": today_visits.groupby(today_visits['time_key'] // 100)['visit_key'].count().idxmax(),
-            "by_membership": visits_with_members['current_membership_type'].value_counts().to_dict(),
-            "by_age_group": visits_with_members['age_group'].value_counts().to_dict()
-        }
-        
-        return analytics
 
 # Főalkalmazás
 def main():
