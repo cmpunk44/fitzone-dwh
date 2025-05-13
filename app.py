@@ -711,6 +711,190 @@ def show_etl_admin():
             st.json(analytics)
         else:
             st.warning("Nincs adat a mai napra")
-
+def show_members():
+    """Tagok kezelése"""
+    st.header("👥 Tagok kezelése")
+    
+    tab1, tab2, tab3 = st.tabs(["Tag lista", "Új tag", "Tagság kezelés"])
+    
+    with tab1:
+        # Szűrők
+        col1, col2 = st.columns(2)
+        with col1:
+            status_filter = st.selectbox("Státusz", ["Mind", "ACTIVE", "INACTIVE"])
+        
+        # Tagok lekérése
+        if status_filter == "Mind":
+            members = supabase_get("members")
+        else:
+            members = supabase_get("members", filter_params={"status": f"eq.{status_filter}"})
+        
+        if not members.empty:
+            # Tagság információ hozzáadása
+            memberships = supabase_get("memberships")
+            membership_types = supabase_get("membership_types")
+            
+            # Jelenleg aktív tagságok
+            if not memberships.empty:
+                current_date = pd.Timestamp.now()
+                memberships['start_date'] = pd.to_datetime(memberships['start_date'])
+                memberships['end_date'] = pd.to_datetime(memberships['end_date'])
+                
+                active_memberships = memberships[
+                    (memberships['start_date'] <= current_date) & 
+                    (memberships['end_date'] >= current_date)
+                ]
+                
+                if not membership_types.empty and not active_memberships.empty:
+                    active_with_type = active_memberships.merge(
+                        membership_types[['type_id', 'type_name']], 
+                        on='type_id',
+                        how='left'
+                    )
+                    
+                    members_display = members.merge(
+                        active_with_type[['member_id', 'type_name']], 
+                        on='member_id',
+                        how='left'
+                    )
+                else:
+                    members_display = members.copy()
+                    members_display['type_name'] = None
+            else:
+                members_display = members.copy()
+                members_display['type_name'] = None
+            
+            # Megjelenítés
+            display_df = members_display[[
+                'member_id', 'first_name', 'last_name', 'email', 
+                'status', 'type_name', 'join_date'
+            ]].copy()
+            
+            display_df.columns = ['ID', 'Keresztnév', 'Vezetéknév', 'Email', 
+                                'Státusz', 'Tagság', 'Csatlakozás']
+            display_df['Tagság'] = display_df['Tagság'].fillna('Nincs aktív')
+            
+            st.dataframe(display_df, use_container_width=True)
+            
+            # CSV export
+            csv = display_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Letöltés CSV-ben", csv, "members.csv", "text/csv")
+    
+    with tab2:
+        st.subheader("Új tag regisztrálása")
+        
+        with st.form("new_member_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                first_name = st.text_input("Keresztnév*")
+                last_name = st.text_input("Vezetéknév*")
+                email = st.text_input("Email*")
+            
+            with col2:
+                phone = st.text_input("Telefon")
+                # Egyszerűbb megoldás a date_input problémára
+                birth_date = st.date_input("Születési dátum")
+            
+            if st.form_submit_button("Regisztráció"):
+                if first_name and last_name and email:
+                    new_member = {
+                        "first_name": first_name,
+                        "last_name": last_name,
+                        "email": email,
+                        "phone": phone,
+                        "birth_date": birth_date.isoformat() if birth_date else None,
+                        "status": "ACTIVE"
+                    }
+                    
+                    if supabase_insert("members", new_member):
+                        st.success("✅ Új tag sikeresen regisztrálva!")
+                        time.sleep(1)
+                        st.rerun()
+                else:
+                    st.error("Kérjük töltse ki a kötelező mezőket!")
+    
+    with tab3:
+        st.subheader("Tagság kezelés")
+        
+        # Tag kiválasztása
+        members = supabase_get("members")
+        if not members.empty:
+            member_options = {
+                f"{m['first_name']} {m['last_name']} ({m['email']})": m['member_id']
+                for _, m in members.iterrows()
+            }
+            
+            selected_member = st.selectbox("Válassz tagot", list(member_options.keys()))
+            member_id = member_options[selected_member]
+            
+            # Jelenlegi tagságok
+            st.write("**Jelenlegi tagságok:**")
+            memberships = supabase_get("memberships", 
+                filter_params={"member_id": f"eq.{member_id}"})
+            
+            if not memberships.empty:
+                membership_types = supabase_get("membership_types")
+                if not membership_types.empty:
+                    memberships_with_type = memberships.merge(
+                        membership_types[['type_id', 'type_name', 'price']], 
+                        on='type_id',
+                        how='left'
+                    )
+                    
+                    for _, ms in memberships_with_type.iterrows():
+                        col1, col2, col3 = st.columns([2, 1, 1])
+                        with col1:
+                            st.write(f"{ms['type_name']}")
+                            st.caption(f"{ms['start_date']} - {ms['end_date']}")
+                        with col2:
+                            st.write(f"{ms['price']} Ft")
+                        with col3:
+                            end_date = pd.to_datetime(ms['end_date']).date()
+                            if end_date >= datetime.now().date():
+                                st.success("Aktív")
+                            else:
+                                st.error("Lejárt")
+                        st.divider()
+            else:
+                st.info("Nincs tagság")
+            
+            # Új tagság hozzáadása
+            st.write("**Új tagság hozzáadása:**")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                membership_types = supabase_get("membership_types")
+                if not membership_types.empty:
+                    type_options = {
+                        f"{t['type_name']} ({t['price']} Ft)": t['type_id']
+                        for _, t in membership_types.iterrows()
+                    }
+                    selected_type = st.selectbox("Tagság típus", list(type_options.keys()))
+                    type_id = type_options[selected_type]
+            
+            with col2:
+                start_date = st.date_input("Kezdő dátum", datetime.now().date())
+            
+            if st.button("Tagság aktiválása"):
+                selected_type_info = membership_types[
+                    membership_types['type_id'] == type_id
+                ].iloc[0]
+                
+                duration_months = int(selected_type_info['duration_months'])
+                end_date = start_date + timedelta(days=30 * duration_months)
+                
+                new_membership = {
+                    "member_id": int(member_id),
+                    "type_id": int(type_id),
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "payment_status": "PENDING"
+                }
+                
+                if supabase_insert("memberships", new_membership):
+                    st.success(f"✅ Tagság aktiválva: {start_date} - {end_date}")
+                    time.sleep(1)
+                    st.rerun()
 if __name__ == "__main__":
     main()
