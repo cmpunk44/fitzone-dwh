@@ -1,4 +1,4 @@
-# app.py - FitZone Gyakorlati Alkalmazás
+# app.py - FitZone valódi ETL-lel
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import time
 
 st.set_page_config(
-    page_title="FitZone Recepcio",
+    page_title="FitZone Management",
     page_icon="🏋️",
     layout="wide"
 )
@@ -54,595 +54,564 @@ def supabase_update(table, id_field, id_value, data):
     response = requests.patch(url, headers=headers, data=json.dumps(data))
     return response.ok
 
-# Üzleti logika
-def get_current_visitors():
-    """Jelenleg bent lévők száma"""
-    check_ins = supabase_get("check_ins")
-    if check_ins.empty:
-        return 0
+def supabase_delete(table, filter_params):
+    """Adatok törlése"""
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    if filter_params:
+        params = "&".join([f"{k}={v}" for k, v in filter_params.items()])
+        url += f"?{params}"
     
-    active = check_ins[pd.isna(check_ins['check_out_time'])]
-    return len(active)
+    response = requests.delete(url, headers=headers)
+    return response.ok
 
-def check_membership_validity(member_id):
-    """Tagság érvényességének ellenőrzése"""
-    memberships = supabase_get("memberships", filter_params={"member_id": f"eq.{member_id}"})
+# ETL Funkciók
+class FitZoneETL:
+    """Valódi ETL folyamatok"""
     
-    if memberships.empty:
-        return False, "Nincs tagság"
-    
-    current_date = pd.Timestamp.now().date()
-    for _, membership in memberships.iterrows():
-        try:
-            start_date = pd.to_datetime(membership['start_date']).date()
-            end_date = pd.to_datetime(membership['end_date']).date()
-            
-            if start_date <= current_date <= end_date:
-                return True, f"Érvényes ({end_date})"
-        except:
-            continue
-    
-    return False, "Lejárt tagság"
-
-def calculate_daily_summary():
-    """Napi összesítő a recepciónak"""
-    summary = {}
-    
-    # Mai látogatók
-    check_ins = supabase_get("check_ins")
-    if not check_ins.empty:
-        today = pd.Timestamp.now().date()
-        check_ins['date'] = pd.to_datetime(check_ins['check_in_time']).dt.date
-        today_visits = check_ins[check_ins['date'] == today]
+    @staticmethod
+    def extract_transform_members():
+        """Tagok ETL - dimenzió tábla frissítése"""
+        # Extract - OLTP adatok
+        members = supabase_get("members")
+        memberships = supabase_get("memberships")
+        membership_types = supabase_get("membership_types")
         
-        summary['total_visits'] = len(today_visits)
-        summary['unique_visitors'] = today_visits['member_id'].nunique()
-        summary['current_inside'] = len(today_visits[pd.isna(today_visits['check_out_time'])])
-    else:
-        summary['total_visits'] = 0
-        summary['unique_visitors'] = 0
-        summary['current_inside'] = 0
-    
-    # Lejáró tagságok
-    memberships = supabase_get("memberships")
-    if not memberships.empty:
-        next_week = pd.Timestamp.now().date() + timedelta(days=7)
-        memberships['end_date'] = pd.to_datetime(memberships['end_date']).dt.date
-        expiring = memberships[
-            (memberships['end_date'] <= next_week) & 
-            (memberships['end_date'] >= pd.Timestamp.now().date())
-        ]
-        summary['expiring_memberships'] = len(expiring)
-    else:
-        summary['expiring_memberships'] = 0
-    
-    return summary
-
-def main():
-    st.title("🏋️ FitZone Recepció")
-    
-    # Napi összesítő header
-    summary = calculate_daily_summary()
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("🏃 Most bent", summary['current_inside'], 
-                 delta=f"/{summary['total_visits']} ma")
-    with col2:
-        st.metric("👥 Mai látogatók", summary['unique_visitors'])
-    with col3:
-        st.metric("⚠️ Lejáró tagságok", summary['expiring_memberships'],
-                 help="Következő 7 napban")
-    with col4:
-        current_hour = datetime.now().hour
-        if 6 <= current_hour <= 9 or 17 <= current_hour <= 20:
-            st.metric("⏰ Időszak", "CSÚCSIDŐ", delta="Több személyzet kell")
-        else:
-            st.metric("⏰ Időszak", "Normál")
-    
-    # Fő funkciók
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🚪 Be/Kiléptetés", 
-        "👤 Új Tag", 
-        "💳 Tagság Kezelés",
-        "📊 Napi Jelentés",
-        "⚙️ Adminisztráció"
-    ])
-    
-    with tab1:
-        show_check_in_out()
-    
-    with tab2:
-        show_new_member()
-    
-    with tab3:
-        show_membership_management()
-    
-    with tab4:
-        show_daily_report()
-    
-    with tab5:
-        show_admin()
-
-def show_check_in_out():
-    """Be- és kiléptetés"""
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("🟢 Beléptetés")
+        if members.empty:
+            return 0
         
-        # Aktív tagok
-        members = supabase_get("members", filter_params={"status": "eq.ACTIVE"})
-        if not members.empty:
-            # Keresés
-            search = st.text_input("Keresés (név vagy email)")
-            
-            if search:
-                mask = (
-                    members['first_name'].str.contains(search, case=False, na=False) |
-                    members['last_name'].str.contains(search, case=False, na=False) |
-                    members['email'].str.contains(search, case=False, na=False)
-                )
-                filtered_members = members[mask]
-            else:
-                filtered_members = members.head(10)  # Első 10 tag
-            
-            if not filtered_members.empty:
-                # Tagok listája
-                for _, member in filtered_members.iterrows():
-                    col_a, col_b, col_c = st.columns([3, 2, 1])
-                    
-                    with col_a:
-                        st.write(f"**{member['first_name']} {member['last_name']}**")
-                        st.caption(member['email'])
-                    
-                    with col_b:
-                        valid, status = check_membership_validity(member['member_id'])
-                        if valid:
-                            st.success(status)
-                        else:
-                            st.error(status)
-                    
-                    with col_c:
-                        if valid:
-                            if st.button("Beléptet", key=f"in_{member['member_id']}"):
-                                check_in_data = {
-                                    "member_id": int(member['member_id']),
-                                    "check_in_time": datetime.now().isoformat()
-                                }
-                                if supabase_insert("check_ins", check_in_data):
-                                    st.success("✅")
-                                    time.sleep(1)
-                                    st.rerun()
-                        else:
-                            st.button("❌", key=f"invalid_{member['member_id']}", disabled=True)
-                    
-                    st.divider()
-    
-    with col2:
-        st.subheader("🔴 Kiléptetés")
+        # Transform
+        current_date = pd.Timestamp.now()
         
-        # Bent lévők
-        check_ins = supabase_get("check_ins")
-        if not check_ins.empty:
-            active_checkins = check_ins[pd.isna(check_ins['check_out_time'])]
+        # Aktív tagságok
+        if not memberships.empty:
+            memberships['start_date'] = pd.to_datetime(memberships['start_date'])
+            memberships['end_date'] = pd.to_datetime(memberships['end_date'])
             
-            if not active_checkins.empty:
-                members = supabase_get("members")
-                active_with_names = active_checkins.merge(
-                    members[['member_id', 'first_name', 'last_name']], 
-                    on='member_id',
+            active_memberships = memberships[
+                (memberships['start_date'] <= current_date) & 
+                (memberships['end_date'] >= current_date)
+            ]
+            
+            # Join a tagság típusokkal
+            if not membership_types.empty:
+                active_with_types = active_memberships.merge(
+                    membership_types[['type_id', 'type_name']], 
+                    on='type_id',
                     how='left'
                 )
                 
-                # Lista
-                for _, checkin in active_with_names.iterrows():
-                    col_a, col_b, col_c = st.columns([3, 2, 1])
+                # Join a tagokkal
+                members_with_membership = members.merge(
+                    active_with_types[['member_id', 'type_name']], 
+                    on='member_id',
+                    how='left'
+                )
+            else:
+                members_with_membership = members.copy()
+                members_with_membership['type_name'] = None
+        else:
+            members_with_membership = members.copy()
+            members_with_membership['type_name'] = None
+        
+        # Életkor csoport számítás
+        members_with_membership['birth_date'] = pd.to_datetime(members_with_membership['birth_date'], errors='coerce')
+        members_with_membership['age'] = members_with_membership['birth_date'].apply(
+            lambda x: (current_date - x).days // 365 if pd.notna(x) else None
+        )
+        
+        def get_age_group(age):
+            if pd.isna(age):
+                return 'Unknown'
+            elif age < 25:
+                return '<25'
+            elif age < 35:
+                return '25-35'
+            elif age < 45:
+                return '35-45'
+            elif age < 55:
+                return '45-55'
+            else:
+                return '55+'
+        
+        members_with_membership['age_group'] = members_with_membership['age'].apply(get_age_group)
+        
+        # Tag óta eltelt napok
+        members_with_membership['join_date'] = pd.to_datetime(members_with_membership['join_date'])
+        members_with_membership['member_since_days'] = (
+            current_date - members_with_membership['join_date']
+        ).dt.days
+        
+        # Load - Dimenzió tábla frissítése (törléssel)
+        # Először töröljük a régieket
+        supabase_delete("dim_member", {"is_current": "eq.true"})
+        
+        # Új rekordok beszúrása
+        success_count = 0
+        for _, member in members_with_membership.iterrows():
+            dim_member = {
+                "member_id": int(member['member_id']),
+                "first_name": member['first_name'],
+                "last_name": member['last_name'],
+                "email": member['email'],
+                "age_group": member['age_group'],
+                "member_since_days": int(member['member_since_days']),
+                "current_membership_type": member['type_name'] or 'None',
+                "member_status": member['status'],
+                "is_current": True,
+                "valid_from": current_date.date().isoformat(),
+                "valid_to": "2099-12-31"
+            }
+            
+            if supabase_insert("dim_member", dim_member):
+                success_count += 1
+        
+        return success_count
+    
+    @staticmethod
+    def extract_transform_visits(days_back=1):
+        """Látogatások ETL - tény tábla frissítése"""
+        # Extract
+        check_ins = supabase_get("check_ins")
+        dim_members = supabase_get("dim_member", filter_params={"is_current": "eq.true"})
+        
+        if check_ins.empty or dim_members.empty:
+            return 0
+        
+        # Transform
+        cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days_back)
+        check_ins['check_in_time'] = pd.to_datetime(check_ins['check_in_time'])
+        
+        recent_visits = check_ins[check_ins['check_in_time'] >= cutoff_date]
+        
+        # Check melyik fact_visits már létezik
+        existing_facts = supabase_get("fact_visits")
+        if not existing_facts.empty:
+            existing_facts['check_in_time'] = pd.to_datetime(existing_facts['check_in_time'])
+            existing_set = set(existing_facts['check_in_time'].dt.to_pydatetime())
+        else:
+            existing_set = set()
+        
+        # Új látogatások
+        new_visits = recent_visits[
+            ~recent_visits['check_in_time'].dt.to_pydatetime().isin(existing_set)
+        ]
+        
+        # Load
+        success_count = 0
+        for _, visit in new_visits.iterrows():
+            # Találjuk meg a megfelelő dim_member rekordot
+            member_match = dim_members[dim_members['member_id'] == visit['member_id']]
+            
+            if not member_match.empty:
+                check_in_time = visit['check_in_time']
+                date_key = int(check_in_time.strftime('%Y%m%d'))
+                time_key = check_in_time.hour * 100 + check_in_time.minute
+                
+                # Időtartam számítás
+                duration = None
+                if pd.notna(visit.get('check_out_time')):
+                    check_out_time = pd.to_datetime(visit['check_out_time'])
+                    duration = int((check_out_time - check_in_time).total_seconds() / 60)
+                
+                fact_visit = {
+                    "date_key": date_key,
+                    "time_key": time_key,
+                    "member_key": int(member_match.iloc[0]['member_key']),
+                    "check_in_time": check_in_time.isoformat(),
+                    "check_out_time": visit.get('check_out_time'),
+                    "duration_minutes": duration
+                }
+                
+                if supabase_insert("fact_visits", fact_visit):
+                    success_count += 1
+        
+        return success_count
+    
+    @staticmethod
+    def run_daily_analytics():
+        """Napi aggregált elemzések"""
+        # Extract
+        fact_visits = supabase_get("fact_visits")
+        dim_members = supabase_get("dim_member")
+        
+        if fact_visits.empty:
+            return None
+        
+        # Transform - Mai adatok
+        today_key = int(datetime.now().strftime('%Y%m%d'))
+        today_visits = fact_visits[fact_visits['date_key'] == today_key]
+        
+        if today_visits.empty:
+            return None
+        
+        # Csatlakozás a dimenzió táblával
+        visits_with_members = today_visits.merge(
+            dim_members[['member_key', 'current_membership_type', 'age_group']], 
+            on='member_key',
+            how='left'
+        )
+        
+        # Aggregációk
+        analytics = {
+            "date": datetime.now().date().isoformat(),
+            "total_visits": len(today_visits),
+            "unique_visitors": today_visits['member_key'].nunique(),
+            "avg_duration": today_visits['duration_minutes'].mean() if today_visits['duration_minutes'].notna().any() else 0,
+            "peak_hour": today_visits.groupby(today_visits['time_key'] // 100)['visit_key'].count().idxmax(),
+            "by_membership": visits_with_members['current_membership_type'].value_counts().to_dict(),
+            "by_age_group": visits_with_members['age_group'].value_counts().to_dict()
+        }
+        
+        return analytics
+
+# Főalkalmazás
+def main():
+    st.title("🏋️ FitZone Management System")
+    
+    # Sidebar
+    st.sidebar.title("Navigáció")
+    page = st.sidebar.selectbox(
+        "Válassz funkciót",
+        ["📊 Dashboard", "🚪 Recepció", "👥 Tagok", "📈 Elemzések", "⚙️ ETL Admin"]
+    )
+    
+    if page == "📊 Dashboard":
+        show_dashboard()
+    elif page == "🚪 Recepció":
+        show_reception()
+    elif page == "👥 Tagok":
+        show_members()
+    elif page == "📈 Elemzések":
+        show_analytics()
+    elif page == "⚙️ ETL Admin":
+        show_etl_admin()
+
+def show_dashboard():
+    """Főoldal áttekintés"""
+    st.header("Dashboard")
+    
+    # ETL futtatás gomb
+    if st.button("🔄 Adatok frissítése", help="ETL folyamat futtatása"):
+        with st.spinner("ETL folyamat fut..."):
+            member_count = FitZoneETL.extract_transform_members()
+            visit_count = FitZoneETL.extract_transform_visits(days_back=7)
+            st.success(f"✅ Frissítve: {member_count} tag, {visit_count} látogatás")
+    
+    # KPI-k
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Aktuális adatok
+    check_ins = supabase_get("check_ins")
+    members = supabase_get("members")
+    
+    with col1:
+        if not check_ins.empty:
+            active_now = check_ins[pd.isna(check_ins['check_out_time'])]
+            st.metric("🏃 Most bent", len(active_now))
+        else:
+            st.metric("🏃 Most bent", 0)
+    
+    with col2:
+        if not members.empty:
+            active_members = members[members['status'] == 'ACTIVE']
+            st.metric("👥 Aktív tagok", len(active_members))
+        else:
+            st.metric("👥 Aktív tagok", 0)
+    
+    with col3:
+        if not check_ins.empty:
+            today = pd.Timestamp.now().date()
+            check_ins['date'] = pd.to_datetime(check_ins['check_in_time']).dt.date
+            today_visits = check_ins[check_ins['date'] == today]
+            st.metric("📅 Mai látogatók", today_visits['member_id'].nunique())
+        else:
+            st.metric("📅 Mai látogatók", 0)
+    
+    with col4:
+        dim_members = supabase_get("dim_member")
+        if not dim_members.empty:
+            st.metric("🎯 DWH rekordok", len(dim_members))
+        else:
+            st.metric("🎯 DWH rekordok", 0)
+    
+    # Grafikonok
+    analytics = FitZoneETL.run_daily_analytics()
+    if analytics:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Tagság típus megoszlás
+            membership_data = pd.DataFrame(
+                list(analytics['by_membership'].items()),
+                columns=['Tagság', 'Látogatók']
+            )
+            fig1 = px.pie(membership_data, values='Látogatók', names='Tagság',
+                         title="Mai látogatók tagság szerint")
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        with col2:
+            # Kor csoport megoszlás
+            age_data = pd.DataFrame(
+                list(analytics['by_age_group'].items()),
+                columns=['Korcsoport', 'Látogatók']
+            )
+            fig2 = px.bar(age_data, x='Korcsoport', y='Látogatók',
+                         title="Mai látogatók korcsoport szerint")
+            st.plotly_chart(fig2, use_container_width=True)
+
+def show_reception():
+    """Recepció funkciók"""
+    st.header("🚪 Recepció")
+    
+    tab1, tab2 = st.tabs(["Be/Kiléptetés", "Aktuális státusz"])
+    
+    with tab1:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Beléptetés")
+            
+            members = supabase_get("members", filter_params={"status": "eq.ACTIVE"})
+            if not members.empty:
+                search = st.text_input("🔍 Keresés", placeholder="Név vagy email")
+                
+                if search:
+                    mask = (
+                        members['first_name'].str.contains(search, case=False, na=False) |
+                        members['last_name'].str.contains(search, case=False, na=False) |
+                        members['email'].str.contains(search, case=False, na=False)
+                    )
+                    filtered = members[mask]
+                else:
+                    filtered = members.head(5)
+                
+                for _, member in filtered.iterrows():
+                    st.write(f"**{member['first_name']} {member['last_name']}**")
+                    st.caption(member['email'])
                     
-                    with col_a:
-                        st.write(f"**{checkin['first_name']} {checkin['last_name']}**")
+                    if st.button(f"✅ Beléptet", key=f"in_{member['member_id']}"):
+                        check_in_data = {
+                            "member_id": int(member['member_id']),
+                            "check_in_time": datetime.now().isoformat()
+                        }
+                        if supabase_insert("check_ins", check_in_data):
+                            st.success("Beléptetés sikeres!")
+                            time.sleep(1)
+                            st.rerun()
+                    st.divider()
+        
+        with col2:
+            st.subheader("Kiléptetés")
+            
+            check_ins = supabase_get("check_ins")
+            if not check_ins.empty:
+                active = check_ins[pd.isna(check_ins['check_out_time'])]
+                
+                if not active.empty:
+                    members = supabase_get("members")
+                    active_with_names = active.merge(
+                        members[['member_id', 'first_name', 'last_name']], 
+                        on='member_id'
+                    )
+                    
+                    for _, checkin in active_with_names.iterrows():
                         check_in_time = pd.to_datetime(checkin['check_in_time'])
                         duration = datetime.now() - check_in_time
                         hours = int(duration.total_seconds() // 3600)
                         minutes = int((duration.total_seconds() % 3600) // 60)
-                        st.caption(f"Belépve: {check_in_time.strftime('%H:%M')} ({hours}ó {minutes}p)")
-                    
-                    with col_b:
-                        if hours >= 3:
-                            st.warning("Régóta bent")
-                    
-                    with col_c:
-                        if st.button("Kiléptet", key=f"out_{checkin['checkin_id']}"):
+                        
+                        st.write(f"**{checkin['first_name']} {checkin['last_name']}**")
+                        st.caption(f"Belépve: {hours}ó {minutes}p")
+                        
+                        if st.button(f"🚪 Kiléptet", key=f"out_{checkin['checkin_id']}"):
                             update_data = {"check_out_time": datetime.now().isoformat()}
                             if supabase_update("check_ins", "checkin_id", 
                                              checkin['checkin_id'], update_data):
-                                st.success("✅")
+                                st.success("Kiléptetés sikeres!")
                                 time.sleep(1)
                                 st.rerun()
-                    
-                    st.divider()
-            else:
-                st.info("Jelenleg nincs bent senki")
-
-def show_new_member():
-    """Új tag regisztráció"""
-    st.subheader("Új tag regisztrálása")
-    
-    with st.form("new_member_form"):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            first_name = st.text_input("Keresztnév*")
-            last_name = st.text_input("Vezetéknév*")
-            email = st.text_input("Email*")
-            phone = st.text_input("Telefon")
-        
-        with col2:
-            birth_date = st.date_input("Születési dátum")
-            
-            # Tagság típus
-            membership_types = supabase_get("membership_types")
-            if not membership_types.empty:
-                type_options = {
-                    f"{t['type_name']} ({t['price']} Ft/{t['duration_months']} hó)": t['type_id']
-                    for _, t in membership_types.iterrows()
-                }
-                selected_type = st.selectbox("Tagság típus*", list(type_options.keys()))
-                
-            start_date = st.date_input("Tagság kezdete", datetime.now().date())
-        
-        submitted = st.form_submit_button("Regisztráció és tagság aktiválás")
-        
-        if submitted:
-            if not (first_name and last_name and email):
-                st.error("Kérjük töltse ki a kötelező mezőket!")
-            else:
-                # 1. Tag létrehozása
-                new_member = {
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    "email": email,
-                    "phone": phone,
-                    "birth_date": birth_date.isoformat() if birth_date else None,
-                    "status": "ACTIVE"
-                }
-                
-                if supabase_insert("members", new_member):
-                    # 2. Megkeressük az új tag ID-ját
-                    created_member = supabase_get("members", 
-                        filter_params={"email": f"eq.{email}"})
-                    
-                    if not created_member.empty:
-                        member_id = created_member.iloc[0]['member_id']
-                        
-                        # 3. Tagság létrehozása
-                        if selected_type and type_options:
-                            type_id = type_options[selected_type]
-                            membership_type = membership_types[
-                                membership_types['type_id'] == type_id
-                            ].iloc[0]
-                            
-                            duration_months = int(membership_type['duration_months'])
-                            end_date = start_date + timedelta(days=30 * duration_months)
-                            
-                            new_membership = {
-                                "member_id": int(member_id),
-                                "type_id": int(type_id),
-                                "start_date": start_date.isoformat(),
-                                "end_date": end_date.isoformat(),
-                                "payment_status": "PENDING"
-                            }
-                            
-                            if supabase_insert("memberships", new_membership):
-                                st.success(f"✅ Tag és tagság sikeresen létrehozva! ID: {member_id}")
-                                st.info(f"Tagság érvényes: {start_date} - {end_date}")
-                            else:
-                                st.error("Hiba a tagság létrehozásakor")
-                else:
-                    st.error("Hiba a tag létrehozásakor")
-
-def show_membership_management():
-    """Tagság kezelés"""
-    st.subheader("Tagság kezelés")
-    
-    tab1, tab2, tab3 = st.tabs(["Megújítás", "Státusz váltás", "Tagság történet"])
-    
-    with tab1:
-        st.markdown("### Tagság megújítása")
-        
-        # Lejáró tagságok
-        memberships = supabase_get("memberships")
-        members = supabase_get("members")
-        membership_types = supabase_get("membership_types")
-        
-        if not memberships.empty and not members.empty:
-            # Lejáró/lejárt tagságok
-            today = pd.Timestamp.now().date()
-            next_month = today + timedelta(days=30)
-            
-            memberships['end_date'] = pd.to_datetime(memberships['end_date']).dt.date
-            expiring = memberships[
-                (memberships['end_date'] <= next_month) & 
-                (memberships['end_date'] >= today - timedelta(days=7))  # Már lejártak is
-            ]
-            
-            if not expiring.empty:
-                expiring_with_details = expiring.merge(
-                    members[['member_id', 'first_name', 'last_name', 'email']], 
-                    on='member_id'
-                ).merge(
-                    membership_types[['type_id', 'type_name', 'price']], 
-                    on='type_id'
-                )
-                
-                for _, membership in expiring_with_details.iterrows():
-                    col1, col2, col3 = st.columns([3, 2, 2])
-                    
-                    with col1:
-                        st.write(f"**{membership['first_name']} {membership['last_name']}**")
-                        st.caption(f"{membership['type_name']} - Lejár: {membership['end_date']}")
-                    
-                    with col2:
-                        if membership['end_date'] < today:
-                            st.error("Lejárt")
-                        elif membership['end_date'] <= today + timedelta(days=7):
-                            st.warning("Hamarosan lejár")
-                        else:
-                            st.info("Lejár 30 napon belül")
-                    
-                    with col3:
-                        if st.button("Megújít", key=f"renew_{membership['membership_id']}"):
-                            # Új tagság létrehozása
-                            new_start = membership['end_date'] + timedelta(days=1)
-                            new_end = new_start + timedelta(days=30 * membership['duration_months'])
-                            
-                            new_membership = {
-                                "member_id": int(membership['member_id']),
-                                "type_id": int(membership['type_id']),
-                                "start_date": new_start.isoformat(),
-                                "end_date": new_end.isoformat(),
-                                "payment_status": "PENDING"
-                            }
-                            
-                            if supabase_insert("memberships", new_membership):
-                                st.success("✅ Megújítva")
-                                time.sleep(1)
-                                st.rerun()
-                    
-                    st.divider()
-            else:
-                st.info("Nincs lejáró tagság")
-    
-    with tab2:
-        st.markdown("### Státusz váltás")
-        
-        members = supabase_get("members")
-        if not members.empty:
-            search = st.text_input("Tag keresése")
-            
-            if search:
-                mask = (
-                    members['first_name'].str.contains(search, case=False, na=False) |
-                    members['last_name'].str.contains(search, case=False, na=False) |
-                    members['email'].str.contains(search, case=False, na=False)
-                )
-                filtered = members[mask]
-            else:
-                filtered = members.head(10)
-            
-            for _, member in filtered.iterrows():
-                col1, col2, col3 = st.columns([3, 2, 2])
-                
-                with col1:
-                    st.write(f"**{member['first_name']} {member['last_name']}**")
-                    st.caption(member['email'])
-                
-                with col2:
-                    if member['status'] == 'ACTIVE':
-                        st.success("Aktív")
-                    else:
-                        st.error("Inaktív")
-                
-                with col3:
-                    new_status = "INACTIVE" if member['status'] == "ACTIVE" else "ACTIVE"
-                    button_text = "Inaktiválás" if member['status'] == "ACTIVE" else "Aktiválás"
-                    
-                    if st.button(button_text, key=f"status_{member['member_id']}"):
-                        if supabase_update("members", "member_id", 
-                                         member['member_id'], {"status": new_status}):
-                            st.success("✅")
-                            time.sleep(1)
-                            st.rerun()
-                
-                st.divider()
-    
-    with tab3:
-        st.markdown("### Tagság történet")
-        
-        # Tag kiválasztása
-        members = supabase_get("members")
-        if not members.empty:
-            member_names = {
-                f"{m['first_name']} {m['last_name']} ({m['email']})": m['member_id']
-                for _, m in members.iterrows()
-            }
-            
-            selected = st.selectbox("Válassz tagot", list(member_names.keys()))
-            
-            if selected:
-                member_id = member_names[selected]
-                memberships = supabase_get("memberships", 
-                    filter_params={"member_id": f"eq.{member_id}"})
-                
-                if not memberships.empty:
-                    membership_types = supabase_get("membership_types")
-                    history = memberships.merge(
-                        membership_types[['type_id', 'type_name', 'price']], 
-                        on='type_id',
-                        how='left'
-                    )
-                    
-                    history = history.sort_values('start_date', ascending=False)
-                    
-                    for _, record in history.iterrows():
-                        col1, col2, col3 = st.columns([2, 2, 1])
-                        
-                        with col1:
-                            st.write(f"**{record['type_name']}**")
-                            st.caption(f"{record['start_date']} - {record['end_date']}")
-                        
-                        with col2:
-                            st.write(f"💰 {record['price']} Ft")
-                            
-                        with col3:
-                            end_date = pd.to_datetime(record['end_date']).date()
-                            if end_date >= datetime.now().date():
-                                st.success("Aktív")
-                            else:
-                                st.error("Lejárt")
-                        
                         st.divider()
                 else:
-                    st.info("Nincs tagság történet")
-
-def show_daily_report():
-    """Napi jelentés"""
-    st.subheader("📊 Napi jelentés")
+                    st.info("Nincs bent látogató")
     
-    # Dátumválasztó
-    report_date = st.date_input("Jelentés dátuma", datetime.now().date())
-    
-    # Adatok lekérése
-    check_ins = supabase_get("check_ins")
-    members = supabase_get("members")
-    
-    if not check_ins.empty:
-        # Szűrés a kiválasztott napra
-        check_ins['date'] = pd.to_datetime(check_ins['check_in_time']).dt.date
-        daily_data = check_ins[check_ins['date'] == report_date]
+    with tab2:
+        st.subheader("Jelenlegi státusz")
         
-        if not daily_data.empty:
-            # Alap statisztikák
-            col1, col2, col3 = st.columns(3)
+        check_ins = supabase_get("check_ins")
+        if not check_ins.empty:
+            active = check_ins[pd.isna(check_ins['check_out_time'])]
+            st.metric("Bent lévők száma", len(active))
             
-            with col1:
-                st.metric("Összes belépés", len(daily_data))
-            with col2:
-                st.metric("Egyedi látogatók", daily_data['member_id'].nunique())
-            with col3:
-                avg_duration = daily_data[pd.notna(daily_data['check_out_time'])].apply(
-                    lambda x: (pd.to_datetime(x['check_out_time']) - 
-                              pd.to_datetime(x['check_in_time'])).total_seconds() / 60,
-                    axis=1
-                ).mean()
-                st.metric("Átl. tartózkodás", f"{avg_duration:.0f} perc" if pd.notna(avg_duration) else "N/A")
-            
-            # Óránkénti eloszlás
-            st.subheader("Óránkénti látogatások")
-            hourly = daily_data.copy()
-            hourly['hour'] = pd.to_datetime(hourly['check_in_time']).dt.hour
-            hourly_count = hourly.groupby('hour').size().reset_index(name='count')
-            
-            fig = px.bar(hourly_count, x='hour', y='count',
-                        title=f"Látogatások eloszlása - {report_date}")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Részletes lista
-            if st.checkbox("Részletes látogatási lista"):
-                detailed = daily_data.merge(
+            if not active.empty:
+                members = supabase_get("members")
+                active_details = active.merge(
                     members[['member_id', 'first_name', 'last_name']], 
                     on='member_id'
                 )
                 
-                detailed['duration'] = detailed.apply(
-                    lambda x: (pd.to_datetime(x['check_out_time']) - 
-                              pd.to_datetime(x['check_in_time'])).total_seconds() / 60
-                    if pd.notna(x['check_out_time']) else None,
-                    axis=1
+                active_details['check_in_time'] = pd.to_datetime(active_details['check_in_time'])
+                active_details['duration'] = (
+                    pd.Timestamp.now() - active_details['check_in_time']
+                ).dt.total_seconds() / 60
+                
+                active_details['duration_str'] = active_details['duration'].apply(
+                    lambda x: f"{int(x//60)}ó {int(x%60)}p"
                 )
                 
-                display_df = detailed[[
-                    'first_name', 'last_name', 'check_in_time', 
-                    'check_out_time', 'duration'
+                display_df = active_details[[
+                    'first_name', 'last_name', 'check_in_time', 'duration_str'
                 ]].copy()
+                display_df.columns = ['Keresztnév', 'Vezetéknév', 'Belépés', 'Bent töltött idő']
                 
-                display_df.columns = ['Keresztnév', 'Vezetéknév', 'Belépés', 'Kilépés', 'Időtartam (perc)']
                 st.dataframe(display_df, use_container_width=True)
-        else:
-            st.info(f"Nincs adat {report_date} napra")
-    
-    # ETL ajánlás
-    st.divider()
-    st.subheader("🤖 Automatikus elemzések")
-    
-    if st.button("Napi elemzés futtatása"):
-        with st.spinner("Elemzés..."):
-            # Egyszerű ETL - napi összesítő
-            if not check_ins.empty:
-                today_data = check_ins[check_ins['date'] == datetime.now().date()]
-                
-                summary = {
-                    "date": datetime.now().date().isoformat(),
-                    "total_visits": len(today_data),
-                    "unique_visitors": today_data['member_id'].nunique(),
-                    "peak_hour": today_data['hour'].mode().iloc[0] if not today_data.empty else None
-                }
-                
-                # Itt lehetne menteni a summary-t egy fact táblába
-                st.json(summary)
-                st.success("✅ Elemzés kész")
 
-def show_admin():
-    """Admin funkciók"""
-    st.subheader("⚙️ Adminisztráció")
+def show_analytics():
+    """Elemzések az adattárházból"""
+    st.header("📈 Elemzések")
     
-    tab1, tab2 = st.tabs(["Rendszer állapot", "Karbantartás"])
+    # Adattárház adatok
+    fact_visits = supabase_get("fact_visits")
+    dim_members = supabase_get("dim_member")
     
-    with tab1:
-        st.markdown("### Rendszer állapot")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            members = supabase_get("members")
-            st.metric("Összes tag", len(members))
-            st.metric("Aktív tagok", len(members[members['status'] == 'ACTIVE']))
-        
-        with col2:
-            memberships = supabase_get("memberships")
-            if not memberships.empty:
-                active_memberships = memberships[
-                    pd.to_datetime(memberships['end_date']) >= datetime.now()
-                ]
-                st.metric("Aktív tagságok", len(active_memberships))
-        
-        with col3:
-            check_ins = supabase_get("check_ins")
-            if not check_ins.empty:
-                today_visits = check_ins[
-                    pd.to_datetime(check_ins['check_in_time']).dt.date == datetime.now().date()
-                ]
-                st.metric("Mai látogatások", len(today_visits))
+    if fact_visits.empty or dim_members.empty:
+        st.warning("Nincs elég adat az elemzéshez. Futtasd az ETL-t!")
+        return
     
-    with tab2:
-        st.markdown("### Karbantartás")
+    # Dátum tartomány
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("Kezdő dátum", datetime.now().date() - timedelta(days=7))
+    with col2:
+        end_date = st.date_input("Záró dátum", datetime.now().date())
+    
+    # Szűrés
+    start_key = int(start_date.strftime('%Y%m%d'))
+    end_key = int(end_date.strftime('%Y%m%d'))
+    
+    filtered_visits = fact_visits[
+        (fact_visits['date_key'] >= start_key) & 
+        (fact_visits['date_key'] <= end_key)
+    ]
+    
+    # Látogatások trendje
+    st.subheader("Látogatási trend")
+    daily_visits = filtered_visits.groupby('date_key').agg({
+        'visit_key': 'count',
+        'member_key': 'nunique',
+        'duration_minutes': 'mean'
+    }).reset_index()
+    
+    daily_visits['date'] = pd.to_datetime(daily_visits['date_key'].astype(str), format='%Y%m%d')
+    
+    fig = px.line(daily_visits, x='date', y='visit_key',
+                  title="Napi látogatások száma",
+                  labels={'visit_key': 'Látogatások', 'date': 'Dátum'})
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Óránkénti eloszlás
+    st.subheader("Óránkénti kihasználtság")
+    hourly = filtered_visits.groupby(filtered_visits['time_key'] // 100)['visit_key'].count()
+    
+    fig = px.bar(x=hourly.index, y=hourly.values,
+                 title="Látogatások eloszlása óránként",
+                 labels={'x': 'Óra', 'y': 'Látogatások'})
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Tagság típus elemzés
+    st.subheader("Tagság típusok aktivitása")
+    visits_with_dim = filtered_visits.merge(
+        dim_members[['member_key', 'current_membership_type']], 
+        on='member_key',
+        how='left'
+    )
+    
+    membership_activity = visits_with_dim.groupby('current_membership_type').agg({
+        'visit_key': 'count',
+        'member_key': 'nunique',
+        'duration_minutes': 'mean'
+    }).reset_index()
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        fig = px.pie(membership_activity, values='visit_key', names='current_membership_type',
+                    title="Látogatások megoszlása tagság szerint")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        fig = px.bar(membership_activity, x='current_membership_type', y='duration_minutes',
+                    title="Átlagos tartózkodási idő tagság szerint",
+                    labels={'duration_minutes': 'Perc'})
+        st.plotly_chart(fig, use_container_width=True)
+
+def show_etl_admin():
+    """ETL adminisztráció"""
+    st.header("⚙️ ETL Adminisztráció")
+    
+    # ETL státusz
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.subheader("OLTP Adatok")
+        members = supabase_get("members")
+        check_ins = supabase_get("check_ins")
+        memberships = supabase_get("memberships")
         
-        # Teszt adatok
-        if st.button("🎲 Teszt adatok generálása"):
-            # Néhány teszt tag
-            test_members = [
-                {"first_name": "Teszt", "last_name": "Elek", "email": f"teszt{datetime.now().timestamp()}@test.com", "status": "ACTIVE"},
-                {"first_name": "Próba", "last_name": "Béla", "email": f"proba{datetime.now().timestamp()}@test.com", "status": "ACTIVE"}
-            ]
-            
-            for member in test_members:
-                supabase_insert("members", member)
-            
-            st.success("✅ Teszt adatok létrehozva")
+        st.metric("Tagok", len(members))
+        st.metric("Belépések", len(check_ins))
+        st.metric("Tagságok", len(memberships))
+    
+    with col2:
+        st.subheader("DWH Adatok")
+        dim_members = supabase_get("dim_member")
+        fact_visits = supabase_get("fact_visits")
         
-        # Tisztítás
-        if st.button("🧹 Régi adatok tisztítása"):
-            st.info("Funkció fejlesztés alatt...")
+        st.metric("Dim Member", len(dim_members))
+        st.metric("Fact Visits", len(fact_visits))
+    
+    with col3:
+        st.subheader("ETL Info")
+        if 'last_etl' in st.session_state:
+            st.info(f"Utolsó ETL: {st.session_state['last_etl']}")
+        else:
+            st.info("Még nem futott ETL")
+    
+    # ETL műveletek
+    st.divider()
+    st.subheader("ETL Műveletek")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 Tag dimenzió frissítése", use_container_width=True):
+            with st.spinner("ETL fut..."):
+                count = FitZoneETL.extract_transform_members()
+                st.success(f"✅ {count} rekord feldolgozva")
+                st.session_state['last_etl'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    with col2:
+        days = st.number_input("Napok száma", min_value=1, max_value=30, value=7)
+        if st.button("📊 Látogatások betöltése", use_container_width=True):
+            with st.spinner("ETL fut..."):
+                count = FitZoneETL.extract_transform_visits(days_back=days)
+                st.success(f"✅ {count} látogatás betöltve")
+                st.session_state['last_etl'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    with col3:
+        if st.button("🚀 Teljes ETL", use_container_width=True):
+            with st.spinner("Teljes ETL fut..."):
+                member_count = FitZoneETL.extract_transform_members()
+                visit_count = FitZoneETL.extract_transform_visits(days_back=30)
+                st.success(f"✅ Kész: {member_count} tag, {visit_count} látogatás")
+                st.session_state['last_etl'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    # Analytics
+    st.divider()
+    if st.button("📈 Napi elemzés futtatása"):
+        analytics = FitZoneETL.run_daily_analytics()
+        if analytics:
+            st.json(analytics)
+        else:
+            st.warning("Nincs adat a mai napra")
 
 if __name__ == "__main__":
     main()
