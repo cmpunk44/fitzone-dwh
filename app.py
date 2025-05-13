@@ -694,9 +694,8 @@ def show_members():
             
             with col2:
                 phone = st.text_input("Telefon")
-                birth_date = st.date_input("Születési dátum", 
-                    min_value=datetime(1900, 1, 1),
-                    max_value=datetime.now() - timedelta(days=365*16))
+                # Egyszerűbb megoldás a date_input problémára
+                birth_date = st.date_input("Születési dátum")
             
             if st.form_submit_button("Regisztráció"):
                 if first_name and last_name and email:
