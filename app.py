@@ -46,6 +46,12 @@ def supabase_insert(table, data):
     """Adatok beszúrása"""
     url = f"{SUPABASE_URL}/rest/v1/{table}"
     response = requests.post(url, headers=headers, data=json.dumps(data))
+    
+    if not response.ok:
+        st.error(f"Insert hiba {table} táblába: {response.status_code}")
+        st.error(f"Hibaüzenet: {response.text}")
+        st.error(f"Data: {json.dumps(data, indent=2)}")
+    
     return response.ok
 
 def supabase_update(table, id_field, id_value, data):
@@ -80,6 +86,9 @@ class FitZoneETL:
             if members.empty:
                 st.warning("Nincsenek tagok az OLTP-ben")
                 return 0
+            
+            # Debug: első tag
+            st.write("Első tag az OLTP-ben:", members.iloc[0].to_dict())
             
             # Transform
             current_date = pd.Timestamp.now()
@@ -142,14 +151,18 @@ class FitZoneETL:
             )
             
             # Load - Dimenzió tábla frissítése
-            # Először töröljük a régieket
-            supabase_delete("dim_member", {"is_current": "eq.true"})
+            # NEM töröljük a régieket, mert lehet member_key probléma van
+            # supabase_delete("dim_member", {"is_current": "eq.true"})
+            
+            # Debug: első transzformált tag
+            st.write("Első transzformált tag:", members_transformed.iloc[0].to_dict())
             
             # Új rekordok beszúrása
             success_count = 0
             for idx, member in members_transformed.iterrows():
                 try:
                     dim_member = {
+                        # NE adjuk meg a member_key-t, hadd generálja a DB
                         "member_id": int(member['member_id']),
                         "first_name": str(member['first_name']),
                         "last_name": str(member['last_name']),
@@ -163,19 +176,40 @@ class FitZoneETL:
                         "valid_to": "2099-12-31"
                     }
                     
+                    # Debug: mit próbálunk beszúrni
+                    if idx == 0:  # Csak az elsőnél
+                        st.write("Beszúrandó adat:", dim_member)
+                    
                     if supabase_insert("dim_member", dim_member):
                         success_count += 1
                     else:
                         st.error(f"Nem sikerült beszúrni: {member['email']}")
+                        # Próbáljuk meg csak az alapokat
+                        simple_dim = {
+                            "member_id": int(member['member_id']),
+                            "first_name": str(member['first_name']),
+                            "last_name": str(member['last_name']),
+                            "email": str(member['email']),
+                            "member_status": str(member['status']),
+                            "is_current": True
+                        }
+                        st.write("Próbáljuk egyszerűbb adatokkal:", simple_dim)
+                        if supabase_insert("dim_member", simple_dim):
+                            st.success("Sikerült az egyszerűbb verzió!")
+                            success_count += 1
+                        break  # Ne próbáljuk a többit
                         
                 except Exception as e:
                     st.error(f"Hiba a tag feldolgozásakor: {e}")
+                    st.error(f"Tag adatok: {member.to_dict()}")
                     continue
             
             return success_count
             
         except Exception as e:
             st.error(f"ETL hiba: {e}")
+            import traceback
+            st.error(traceback.format_exc())
             return 0
     
     @staticmethod
@@ -759,8 +793,9 @@ def show_members():
             
             with col2:
                 phone = st.text_input("Telefon")
-                # Egyszerűbb megoldás a date_input problémára
-                birth_date = st.date_input("Születési dátum")
+                birth_date = st.date_input("Születési dátum", 
+                    min_value=datetime(1900, 1, 1),
+                    max_value=datetime.now() - timedelta(days=365*16))
             
             if st.form_submit_button("Regisztráció"):
                 if first_name and last_name and email:
