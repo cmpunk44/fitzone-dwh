@@ -131,7 +131,7 @@ def simple_etl_dim_member():
 
 # === FŐALKALMAZÁS ===
 def main():
-    st.title("🏋️ FitZone Adattárház - Egyszerű Verzió")
+    st.title("🏋️ FitZone Adattárház")
     
     # Oldalsáv navigáció
     st.sidebar.header("📋 Navigáció")
