@@ -84,89 +84,78 @@ def run_full_etl():
     return results
 
 def etl_dim_member():
-    """Tag dimenzió ETL - EGYSZERŰSÍTETT DEBUG VERZIÓ"""
-    print("🔍 ETL dim_member DEBUG indítása...")
-    
-    # 1. OLTP members lekérése
+    """Tag dimenzió ETL (SCD Type 2)"""
     members = supabase_get("members")
-    print(f"📊 Members tábla: {len(members)} rekord")
-    
     if members.empty:
-        print("❌ Members tábla üres!")
         return 0
     
-    print(f"📋 Members mezők: {members.columns.tolist()}")
-    print(f"📝 Utolsó tag: {members.iloc[-1].to_dict() if len(members) > 0 else 'Nincs'}")
-    
-    # 2. Jelenlegi DWH dimenzió
     existing_dim = supabase_get("dim_member")
-    print(f"📦 Dim_member tábla: {len(existing_dim)} rekord")
-    
     processed = 0
-    errors = 0
     
-    # 3. Minden tag feldolgozása
-    for index, member in members.iterrows():
-        try:
-            member_id = member['member_id']
-            print(f"🔄 Feldolgozás: {member['first_name']} {member['last_name']} (ID: {member_id})")
+    for _, member in members.iterrows():
+        # Életkor csoport számítása
+        age_group = "Unknown"
+        if pd.notna(member.get('birth_date')):
+            birth_date = pd.to_datetime(member['birth_date'])
+            age = (datetime.now() - birth_date).days // 365
+            if age < 25: age_group = "18-25"
+            elif age < 35: age_group = "25-35"
+            elif age < 45: age_group = "35-45"
+            elif age < 55: age_group = "45-55"
+            else: age_group = "55+"
+        
+        # Tag az óta napok
+        member_since_days = 0
+        if pd.notna(member.get('join_date')):
+            join_date = pd.to_datetime(member['join_date'])
+            member_since_days = (datetime.now() - join_date).days
+        
+        new_record = {
+            "member_id": int(member['member_id']),
+            "first_name": member['first_name'],
+            "last_name": member['last_name'],
+            "email": member['email'],
+            "age_group": age_group,
+            "member_since_days": member_since_days,
+            "member_status": member['status'],
+            "valid_from": datetime.now().date().isoformat(),
+            "valid_to": "2099-12-31",
+            "is_current": True
+        }
+        
+        # SCD2 logika egyszerűsítve
+        if not existing_dim.empty:
+            current_records = existing_dim[
+                (existing_dim['member_id'] == member['member_id']) & 
+                (existing_dim['is_current'] == True)
+            ]
             
-            # Életkor csoport számítása
-            age_group = "Unknown"
-            if pd.notna(member.get('birth_date')):
-                birth_date = pd.to_datetime(member['birth_date'])
-                age = (datetime.now() - birth_date).days // 365
-                if age < 25: age_group = "18-25"
-                elif age < 35: age_group = "25-35"
-                elif age < 45: age_group = "35-45"
-                elif age < 55: age_group = "45-55"
-                else: age_group = "55+"
-                print(f"   👤 Életkor csoport: {age_group}")
-            
-            # Tag az óta napok
-            member_since_days = 0
-            if pd.notna(member.get('join_date')):
-                join_date = pd.to_datetime(member['join_date'])
-                member_since_days = (datetime.now() - join_date).days
-                print(f"   📅 Tag {member_since_days} napja")
-            
-            # EGYSZERŰSÍTETT LOGIKA: Mindig új rekord (SCD2 nélkül)
-            new_record = {
-                "member_id": int(member_id),
-                "first_name": member['first_name'],
-                "last_name": member['last_name'],
-                "email": member['email'],
-                "age_group": age_group,
-                "member_since_days": member_since_days,
-                "member_status": member['status'],
-                "valid_from": datetime.now().date().isoformat(),
-                "valid_to": "2099-12-31",
-                "is_current": True
-            }
-            
-            print(f"   💾 Beszúrandó rekord: {new_record}")
-            
-            # Ellenőrzés: már létezik ez a member_id?
-            if not existing_dim.empty:
-                existing_member = existing_dim[existing_dim['member_id'] == member_id]
-                if not existing_member.empty:
-                    print(f"   ⚠️ Member_id {member_id} már létezik dim_member-ben")
-                    continue
-            
-            # Beszúrás
+            if not current_records.empty:
+                current_record = current_records.iloc[0]
+                # Ha változott valami, új rekord
+                if (current_record.get('member_status') != member['status'] or 
+                    current_record.get('first_name') != member['first_name']):
+                    
+                    # Régi lezárása
+                    supabase_update("dim_member", "member_key", current_record['member_key'], {
+                        "valid_to": datetime.now().date().isoformat(),
+                        "is_current": False
+                    })
+                    
+                    # Új beszúrása
+                    if supabase_insert("dim_member", new_record):
+                        processed += 1
+            else:
+                # Új tag
+                if supabase_insert("dim_member", new_record):
+                    processed += 1
+        else:
+            # Első betöltés
             if supabase_insert("dim_member", new_record):
                 processed += 1
-                print(f"   ✅ Sikeresen beszúrva!")
-            else:
-                errors += 1
-                print(f"   ❌ Beszúrás sikertelen!")
-                
-        except Exception as e:
-            errors += 1
-            print(f"   💥 Hiba: {str(e)}")
     
-    print(f"📊 ETL dim_member befejezve: {processed} siker, {errors} hiba")
     return processed
+
 def etl_dim_date():
     """Dátum dimenzió feltöltése"""
     existing_dates = supabase_get("dim_date")
