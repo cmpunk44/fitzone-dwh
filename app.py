@@ -23,7 +23,7 @@ headers = {
 }
 
 # === API FÜGGVÉNYEK ===
-def supabase_get(table, select="*", filter_params=None):
+def supabase_get(table, select="*", filter_params=None, show_error=True):
     """Adatok lekérése"""
     url = f"{SUPABASE_URL}/rest/v1/{table}?select={select}"
     
@@ -37,7 +37,8 @@ def supabase_get(table, select="*", filter_params=None):
         data = response.json()
         return pd.DataFrame(data) if data else pd.DataFrame()
     else:
-        st.error(f"API hiba: {response.text}")
+        if show_error:
+            st.error(f"API hiba ({table}): {response.text}")
         return pd.DataFrame()
 
 def supabase_insert(table, data):
@@ -262,6 +263,18 @@ def etl_fact_revenue():
     return processed
 
 # === SEGÉDFÜGGVÉNYEK ===
+def check_dwh_tables():
+    """Ellenőrzi hogy a DWH táblák léteznek-e"""
+    dwh_tables = ['dim_member', 'dim_date', 'fact_visits', 'fact_revenue']
+    missing_tables = []
+    
+    for table in dwh_tables:
+        df = supabase_get(table, show_error=False)
+        if df is None or (hasattr(df, 'empty') and len(df.columns) == 0):
+            missing_tables.append(table)
+    
+    return missing_tables
+
 def calculate_stats():
     """Alapvető statisztikák"""
     stats = {}
@@ -327,6 +340,66 @@ def show_dashboard():
     """Főoldal - KPI Dashboard"""
     st.header("📊 Főoldal - KPI Mutatók")
     
+    # DWH táblák ellenőrzése
+    missing_tables = check_dwh_tables()
+    if missing_tables:
+        st.error(f"❌ Hiányzó DWH táblák: {', '.join(missing_tables)}")
+        st.info("🔧 Hozd létre a DWH táblákat a Supabase SQL Editor-ban az alábbi script futtatásával:")
+        
+        with st.expander("📋 SQL Script a DWH táblák létrehozásához"):
+            st.code("""
+-- Futtasd le ezt a Supabase SQL Editor-ban:
+
+CREATE TABLE IF NOT EXISTS public.dim_member (
+    member_key SERIAL PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    email VARCHAR(100),
+    age_group VARCHAR(20),
+    member_since_days INTEGER DEFAULT 0,
+    member_status VARCHAR(20),
+    valid_from DATE NOT NULL,
+    valid_to DATE NOT NULL,
+    is_current BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.dim_date (
+    date_key INTEGER PRIMARY KEY,
+    date DATE NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    month_name VARCHAR(20),
+    day_of_week INTEGER,
+    is_weekend BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.fact_visits (
+    visit_key VARCHAR PRIMARY KEY,
+    date_key INTEGER,
+    time_key INTEGER,
+    member_key INTEGER,
+    check_in_time TIMESTAMPTZ,
+    check_out_time TIMESTAMPTZ,
+    duration_minutes INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.fact_revenue (
+    revenue_key VARCHAR PRIMARY KEY,
+    date_key INTEGER,
+    member_key INTEGER,
+    payment_amount DECIMAL(10,2),
+    payment_type VARCHAR(50),
+    payment_date TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+            """, language="sql")
+        
+        st.warning("⚠️ A DWH funkciók csak a táblák létrehozása után lesznek elérhetők!")
+    
     stats = calculate_stats()
     
     # OLTP KPI-k
@@ -345,45 +418,46 @@ def show_dashboard():
     with col4:
         st.metric("Most bent", stats['currently_inside'])
     
-    # DWH KPI-k
-    st.divider()
-    st.subheader("🏢 Adattárház (DWH) Státusz")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        dim_member = supabase_get("dim_member")
-        dim_date = supabase_get("dim_date")
-        st.metric("Dim_member rekordok", len(dim_member))
-        st.metric("Dim_date rekordok", len(dim_date))
-    
-    with col2:
-        fact_visits = supabase_get("fact_visits")
-        fact_revenue = supabase_get("fact_revenue")
-        st.metric("Fact_visits rekordok", len(fact_visits))
-        st.metric("Fact_revenue rekordok", len(fact_revenue))
-    
-    with col3:
-        if not fact_visits.empty:
-            avg_duration = fact_visits[fact_visits['duration_minutes'] > 0]['duration_minutes'].mean()
-            total_duration = fact_visits['duration_minutes'].sum()
-        else:
-            avg_duration = 0
-            total_duration = 0
+    # DWH KPI-k csak ha minden tábla létezik
+    if not missing_tables:
+        st.divider()
+        st.subheader("🏢 Adattárház (DWH) Státusz")
         
-        st.metric("Átlag edzésidő", f"{avg_duration:.0f} perc" if avg_duration > 0 else "N/A")
-        st.metric("Összes edzésidő", f"{total_duration:,.0f} perc")
-    
-    with col4:
-        if not fact_revenue.empty:
-            total_revenue = fact_revenue['payment_amount'].sum()
-            avg_payment = fact_revenue['payment_amount'].mean()
-        else:
-            total_revenue = 0
-            avg_payment = 0
+        col1, col2, col3, col4 = st.columns(4)
         
-        st.metric("DWH összes bevétel", f"{total_revenue:,.0f} Ft")
-        st.metric("Átlag fizetés", f"{avg_payment:.0f} Ft" if avg_payment > 0 else "N/A")
+        with col1:
+            dim_member = supabase_get("dim_member")
+            dim_date = supabase_get("dim_date")
+            st.metric("Dim_member rekordok", len(dim_member))
+            st.metric("Dim_date rekordok", len(dim_date))
+        
+        with col2:
+            fact_visits = supabase_get("fact_visits")
+            fact_revenue = supabase_get("fact_revenue")
+            st.metric("Fact_visits rekordok", len(fact_visits))
+            st.metric("Fact_revenue rekordok", len(fact_revenue))
+        
+        with col3:
+            if not fact_visits.empty:
+                avg_duration = fact_visits[fact_visits['duration_minutes'] > 0]['duration_minutes'].mean()
+                total_duration = fact_visits['duration_minutes'].sum()
+            else:
+                avg_duration = 0
+                total_duration = 0
+            
+            st.metric("Átlag edzésidő", f"{avg_duration:.0f} perc" if avg_duration > 0 else "N/A")
+            st.metric("Összes edzésidő", f"{total_duration:,.0f} perc")
+        
+        with col4:
+            if not fact_revenue.empty:
+                total_revenue = fact_revenue['payment_amount'].sum()
+                avg_payment = fact_revenue['payment_amount'].mean()
+            else:
+                total_revenue = 0
+                avg_payment = 0
+            
+            st.metric("DWH összes bevétel", f"{total_revenue:,.0f} Ft")
+            st.metric("Átlag fizetés", f"{avg_payment:.0f} Ft" if avg_payment > 0 else "N/A")
     
     # Aktív tagok táblázat
     st.divider()
@@ -773,6 +847,67 @@ def show_membership():
 def show_etl():
     """ETL folyamatok kezelése"""
     st.header("⚙️ ETL Folyamatok Kezelése")
+    
+    # DWH táblák ellenőrzése
+    missing_tables = check_dwh_tables()
+    if missing_tables:
+        st.error(f"❌ Hiányzó DWH táblák: {', '.join(missing_tables)}")
+        st.warning("⚠️ Az ETL folyamatok csak a DWH táblák létrehozása után futtathatók!")
+        
+        with st.expander("📋 DWH táblák létrehozása"):
+            st.markdown("""
+            ### Lépések:
+            1. Menj a Supabase Dashboard-ra
+            2. Nyisd meg a **SQL Editor**-t
+            3. Futtasd le az alábbi SQL script-et:
+            """)
+            
+            st.code("""
+CREATE TABLE IF NOT EXISTS public.dim_member (
+    member_key SERIAL PRIMARY KEY,
+    member_id INTEGER NOT NULL,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    email VARCHAR(100),
+    age_group VARCHAR(20),
+    member_since_days INTEGER DEFAULT 0,
+    member_status VARCHAR(20),
+    valid_from DATE NOT NULL,
+    valid_to DATE NOT NULL,
+    is_current BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS public.dim_date (
+    date_key INTEGER PRIMARY KEY,
+    date DATE NOT NULL,
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    month_name VARCHAR(20),
+    day_of_week INTEGER,
+    is_weekend BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS public.fact_visits (
+    visit_key VARCHAR PRIMARY KEY,
+    date_key INTEGER,
+    time_key INTEGER,
+    member_key INTEGER,
+    check_in_time TIMESTAMPTZ,
+    check_out_time TIMESTAMPTZ,
+    duration_minutes INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS public.fact_revenue (
+    revenue_key VARCHAR PRIMARY KEY,
+    date_key INTEGER,
+    member_key INTEGER,
+    payment_amount DECIMAL(10,2),
+    payment_type VARCHAR(50),
+    payment_date TIMESTAMPTZ
+);
+            """, language="sql")
+        
+        return
     
     st.markdown("""
     ### 📋 ETL Folyamat Leírása
